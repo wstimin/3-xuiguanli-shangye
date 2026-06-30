@@ -18,13 +18,13 @@
 
 ## 一键安装
 
-服务器执行，把地址换成你的仓库：
+服务器执行：
 
 ```bash
-REPO_URL=https://github.com/你的用户名/你的仓库.git bash <(curl -fsSL https://raw.githubusercontent.com/你的用户名/你的仓库/main/install.sh)
+REPO_URL=https://github.com/wstimin/3-xuiguanlimianban.git bash <(curl -fsSL https://raw.githubusercontent.com/wstimin/3-xuiguanlimianban/main/install.sh)
 ```
 
-如果你的默认分支不是 `main`，也要把链接里的 `main` 改成实际分支名。
+如果你 Fork 了本项目，把命令里的仓库地址改成自己的；如果默认分支不是 `main`，也要把链接里的 `main` 改成实际分支名。
 
 安装完成后访问：
 
