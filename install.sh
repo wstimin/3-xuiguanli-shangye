@@ -41,8 +41,11 @@ install_app_files() {
     if [ -d "${APP_DIR}/.git" ]; then
       git -C "${APP_DIR}" pull --ff-only
     else
-      rm -rf "${APP_DIR:?}"/*
-      git clone "${REPO_URL}" "${APP_DIR}"
+      tmp_dir="$(mktemp -d)"
+      git clone "${REPO_URL}" "${tmp_dir}/app"
+      find "${APP_DIR}" -mindepth 1 -maxdepth 1 ! -name data -exec rm -rf {} +
+      cp -a "${tmp_dir}/app/." "${APP_DIR}/"
+      rm -rf "${tmp_dir}"
     fi
   else
     script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,7 +55,8 @@ install_app_files() {
       exit 1
     fi
     if [ "${script_dir}" != "${APP_DIR}" ]; then
-      cp -a "${script_dir}/." "${APP_DIR}/"
+      find "${APP_DIR}" -mindepth 1 -maxdepth 1 ! -name data -exec rm -rf {} +
+      find "${script_dir}" -mindepth 1 -maxdepth 1 ! -name data -exec cp -a {} "${APP_DIR}/" \;
     fi
   fi
   mkdir -p "${APP_DIR}/data"
