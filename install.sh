@@ -105,6 +105,7 @@ main() {
   echo
   echo "安装完成。"
   echo "访问地址：http://${ip_addr:-服务器IP}:${PORT}"
+  echo "说明：本系统基于 3-xui 面板 3.4.1 版本开发和测试。"
   echo "默认账号：admin"
   echo "默认密码：admin123"
   echo "建议登录后进入账号安全修改密码。"

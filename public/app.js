@@ -490,7 +490,10 @@ async function handleAction(event) {
       state.db = result.data;
       const removedRules = result.detail?.socksResult?.removedRules || 0;
       const removedOutbounds = result.detail?.socksResult?.removedOutbounds || 0;
-      toast(`用户已删除，远程 client 和 SOCKS 路由已清理：规则 ${removedRules}，出站 ${removedOutbounds}`);
+      const clientText = result.detail?.clientResult?.fallback?.deleted ? '，已用兼容接口删除 3-xui 客户端' : result.detail?.clientResult?.deleted || result.detail?.clientResult?.detached ? '，3-xui 客户端已处理' : '';
+      const inboundText = result.detail?.inboundResult?.deleted ? '，空入站已删除' : '';
+      const warningText = result.warning ? `，远程警告：${result.warning}` : '';
+      toast(`用户已删除，SOCKS 清理：规则 ${removedRules}，出站 ${removedOutbounds}${clientText}${inboundText}${warningText}`);
       return render();
     }
     if (action === 'delete-server' && confirm('确定删除这个 3x-ui 节点？')) {
@@ -517,7 +520,7 @@ async function handleAction(event) {
     if (action === 'import-server-customers' && confirm('确定从这个 3-xui 节点同步用户到本地用户列表？相同 Client Email 会更新，不会重复新增。')) {
       const result = await api(`/api/xui-servers/${id}/import-customers`, { method: 'POST' });
       state.db = result.data;
-      toast(`同步完成：新增 ${result.detail.created}，更新 ${result.detail.updated}，跳过 ${result.detail.skipped}`);
+      toast(`同步完成：用户新增 ${result.detail.created}，更新 ${result.detail.updated}，SOCKS 新增 ${result.detail.socksCreated}，更新 ${result.detail.socksUpdated}，绑定 ${result.detail.socksBound}`);
       return render();
     }
   } catch (error) {

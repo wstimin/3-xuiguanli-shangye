@@ -345,7 +345,7 @@ function withApiPrefix(server, endpoint) {
 function uniqueRoutes(routes) {
   const seen = new Set();
   return routes.filter((route) => {
-    const key = `${route.endpoint}:${JSON.stringify(route.body ?? {})}`;
+    const key = `${route.method || 'GET'}:${route.endpoint}:${JSON.stringify(route.body ?? {})}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -451,7 +451,12 @@ function inboundLabel(item) {
 }
 
 function inboundTagOf(item) {
-  return String(item?.tag || item?.inboundTag || item?.inbound_tag || '').trim();
+  const explicit = String(item?.tag || item?.inboundTag || item?.inbound_tag || '').trim();
+  if (explicit) return explicit;
+  const port = inboundPortOf(item);
+  const settings = parseMaybeJson(item?.streamSettings) || item?.streamSettings || {};
+  const network = String(settings?.network || item?.network || 'tcp').trim() || 'tcp';
+  return port ? `in-${port}-${network}` : '';
 }
 
 function inboundPortOf(item) {
@@ -757,11 +762,17 @@ async function xuiRequest(server, endpoint, options = {}) {
 
 function xuiArray(data) {
   const root = xuiObject(data);
+  const obj = parseMaybeJson(data?.obj);
+  const body = parseMaybeJson(data?.data);
+  const result = parseMaybeJson(data?.result);
   if (Array.isArray(data)) return data;
   if (Array.isArray(root)) return root;
   if (Array.isArray(root?.items)) return root.items;
   if (Array.isArray(root?.inbounds)) return root.inbounds;
   if (Array.isArray(root?.clients)) return root.clients;
+  if (Array.isArray(obj)) return obj;
+  if (Array.isArray(body)) return body;
+  if (Array.isArray(result)) return result;
   if (Array.isArray(data?.obj)) return data.obj;
   if (Array.isArray(data?.data)) return data.data;
   if (Array.isArray(data?.result)) return data.result;
@@ -814,19 +825,37 @@ async function listXuiInbounds(server) {
 }
 
 async function xuiClientExists(server, email) {
+  const detail = await getXuiClientDetail(server, email);
+  return Boolean(detail.exists);
+}
+
+async function getXuiClientDetail(server, email) {
   try {
     const result = await xuiRequest(server, withApiPrefix(server, `/panel/api/clients/get/${encodeURIComponent(email)}`), { method: 'GET' });
-    const object = xuiObject(result.data);
-    if (object && Object.keys(object).length) return true;
-    return false;
+    const explicitObj = parseMaybeJson(result.data?.obj) ?? result.data?.obj;
+    if (Object.prototype.hasOwnProperty.call(result.data || {}, 'obj') && !explicitObj) return { exists: false, client: null, inboundIds: [], raw: result.data };
+    const object = explicitObj && typeof explicitObj === 'object' ? explicitObj : xuiObject(result.data);
+    const client = object.client || object;
+    const inboundIds = inboundIdsOfClient(object).length ? inboundIdsOfClient(object) : inboundIdsOfClient(client);
+    if (object && Object.keys(object).length && clientEmailOf(client)) return { exists: true, client, inboundIds, raw: result.data };
+    return { exists: false, client: null, inboundIds: [], raw: result.data };
   } catch (error) {
-    if (/record not found|not found|404/i.test(error.message)) return false;
+    if (/record not found|not found|404/i.test(error.message)) return { exists: false, client: null, inboundIds: [] };
     throw error;
   }
 }
 
 function clientEmailOf(client) {
   return String(client?.email || client?.clientEmail || client?.name || '').trim();
+}
+
+function clientRemarkOf(client) {
+  return String(client?.remark || client?.comment || client?.desc || client?.description || client?.groupName || client?.group_name || '').trim();
+}
+
+function clientNameOf(client, email) {
+  const value = clientRemarkOf(client) || String(client?.name || client?.username || '').trim();
+  return value && value !== email ? value : email;
 }
 
 function clientUuidOf(client) {
@@ -839,10 +868,57 @@ function clientUuidOf(client) {
   return '';
 }
 
+function clientSubIdOf(client) {
+  return String(client?.subId || client?.sub_id || client?.sid || '').trim();
+}
+
+function clientIdentifierValues(client, extra = []) {
+  const values = [
+    clientUuidOf(client),
+    client?.uuid,
+    client?.password,
+    client?.id,
+    clientEmailOf(client),
+    client?.clientEmail,
+    clientSubIdOf(client),
+    client?.name,
+    client?.username,
+    ...extra
+  ];
+  const seen = new Set();
+  return values
+    .map((value) => String(value || '').trim())
+    .filter((value) => {
+      if (!value || seen.has(value)) return false;
+      seen.add(value);
+      return true;
+    });
+}
+
+function clientMatchesTarget(client, target = {}) {
+  const expected = clientIdentifierValues({}, [
+    target.email,
+    target.clientEmail,
+    target.clientId,
+    target.clientUuid,
+    target.uuid,
+    target.subId,
+    clientUuidOf(target.detailClient || {}),
+    clientEmailOf(target.detailClient || {}),
+    clientSubIdOf(target.detailClient || {})
+  ]).map((value) => value.toLowerCase());
+  if (!expected.length) return false;
+  const actual = clientIdentifierValues(client).map((value) => value.toLowerCase());
+  return actual.some((value) => expected.includes(value));
+}
+
 function inboundIdsOfClient(client, fallbackInboundId = '') {
   const raw = client?.inboundIds || client?.inbound_ids || client?.inbounds || client?.inboundId || client?.inbound_id || fallbackInboundId;
-  const values = Array.isArray(raw) ? raw : String(raw || '').split(',');
-  return values.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0);
+  const parsed = parseMaybeJson(raw);
+  const values = Array.isArray(parsed) ? parsed : Array.isArray(raw) ? raw : String(raw || '').split(',');
+  return values
+    .map((value) => Number(value?.id ?? value?.inboundId ?? value?.inbound_id ?? value))
+    .filter((value) => Number.isInteger(value) && value > 0);
 }
 
 function expiryIsoFromClient(client) {
@@ -872,6 +948,156 @@ function clientsFromInbound(inbound) {
     inboundIds: inboundId ? [inboundId] : [],
     inbound
   }));
+}
+
+function importAssociationKey(email, inboundId) {
+  return `${String(email || '').trim()}::${String(inboundId || '').trim() || 'unbound'}`;
+}
+
+function firstInboundIdOfImportItem(item) {
+  const inboundIds = inboundIdsOfClient(item, item?.inboundId || item?.inbound_id);
+  return inboundIds[0] ? String(inboundIds[0]) : '';
+}
+
+function clientIndexesFromInbounds(inbounds) {
+  const byEmail = new Map();
+  const byEmailInbound = new Map();
+  const items = [];
+  for (const item of (inbounds || []).flatMap(clientsFromInbound)) {
+    const email = clientEmailOf(item.client);
+    const inboundId = firstInboundIdOfImportItem(item);
+    if (!email) continue;
+    items.push(item);
+    if (!byEmail.has(email)) byEmail.set(email, item);
+    if (inboundId) byEmailInbound.set(importAssociationKey(email, inboundId), item);
+  }
+  return { byEmail, byEmailInbound, items };
+}
+
+function mergeClientObjects(base = {}, overlay = {}) {
+  const merged = { ...base, ...overlay };
+  const baseId = String(base.id || '').trim();
+  const overlayId = String(overlay.id || '').trim();
+  if (baseId && overlayId && /^\\d+$/.test(overlayId) && !/^\\d+$/.test(baseId)) merged.id = base.id;
+  return merged;
+}
+
+function mergeClientImportItem(item, indexed) {
+  if (!indexed) return item;
+  const client = mergeClientObjects(indexed.client || {}, item.client || item || {});
+  const inboundIds = inboundIdsOfClient(item).length ? inboundIdsOfClient(item) : inboundIdsOfClient(indexed);
+  return {
+    ...indexed,
+    ...item,
+    client,
+    inboundIds,
+    inbound: item.inbound || indexed.inbound
+  };
+}
+
+function expandClientImportItems(items) {
+  return items.flatMap((item) => {
+    const inboundIds = inboundIdsOfClient(item, item?.inboundId || item?.inbound_id);
+    if (inboundIds.length <= 1) return [item];
+    return inboundIds.map((inboundId) => ({
+      ...item,
+      inboundId,
+      inboundIds: [inboundId]
+    }));
+  });
+}
+
+function indexedClientForImportItem(item, indexes) {
+  const email = clientEmailOf(item.client || item);
+  const inboundId = firstInboundIdOfImportItem(item);
+  return indexes.byEmailInbound.get(importAssociationKey(email, inboundId)) || indexes.byEmail.get(email);
+}
+
+function stringList(value) {
+  if (Array.isArray(value)) return value.map((item) => String(item || '').trim()).filter(Boolean);
+  if (value === undefined || value === null || value === '') return [];
+  return String(value).split(',').map((item) => item.trim()).filter(Boolean);
+}
+
+function firstSocksServer(outbound) {
+  const settings = parseMaybeJson(outbound?.settings) || outbound?.settings || {};
+  const servers = settings?.servers;
+  return Array.isArray(servers) && servers.length ? servers[0] : null;
+}
+
+function socksUserOf(server) {
+  const users = server?.users;
+  return Array.isArray(users) && users.length ? users[0] : {};
+}
+
+function socksInputFromOutbound(outbound) {
+  const server = firstSocksServer(outbound);
+  if (!server?.address || !server?.port || !outbound?.tag) return null;
+  const user = socksUserOf(server);
+  return {
+    name: outbound.tag,
+    tag: outbound.tag,
+    address: server.address,
+    port: server.port,
+    username: user.user || user.username || '',
+    password: user.pass || user.password || '',
+    status: 'enabled',
+    remark: '从 3-xui Xray 出站同步导入'
+  };
+}
+
+function upsertSocksNodesFromXray(db, config) {
+  const outbounds = Array.isArray(config?.outbounds) ? config.outbounds : [];
+  let created = 0;
+  let updated = 0;
+  const tagToSocksId = new Map();
+  for (const outbound of outbounds) {
+    if (String(outbound?.protocol || '').toLowerCase() !== 'socks') continue;
+    const input = socksInputFromOutbound(outbound);
+    if (!input) continue;
+    const index = db.socksNodes.findIndex((node) => node.tag === input.tag);
+    if (index >= 0) {
+      db.socksNodes[index] = normalizeSocks(input, db.socksNodes[index]);
+      tagToSocksId.set(input.tag, db.socksNodes[index].id);
+      updated += 1;
+    } else {
+      const node = normalizeSocks(input);
+      db.socksNodes.push(node);
+      tagToSocksId.set(input.tag, node.id);
+      created += 1;
+    }
+  }
+  return { created, updated, tagToSocksId };
+}
+
+function inboundContext(inbounds) {
+  const byId = new Map();
+  const tagToId = new Map();
+  for (const inbound of inbounds || []) {
+    const inboundId = inboundIdOf(inbound);
+    const tag = inboundTagOf(inbound);
+    if (inboundId) byId.set(inboundId, inbound);
+    if (tag && inboundId) tagToId.set(tag, inboundId);
+  }
+  return { byId, tagToId };
+}
+
+function resolveSocksNodeIdForClient(item, client, context) {
+  const email = clientEmailOf(client);
+  const inboundIds = inboundIdsOfClient(item, item.inboundId || item.inbound_id);
+  const inboundTags = new Set(inboundIds.map((inboundId) => inboundTagOf(context.inboundsById?.get(inboundId))).filter(Boolean));
+  const rules = Array.isArray(context.xrayConfig?.routing?.rules) ? context.xrayConfig.routing.rules : [];
+  for (const rule of rules) {
+    if (!rule || rule.enabled === false || !context.tagToSocksId.has(rule.outboundTag)) continue;
+    const users = stringList(rule.user);
+    if (users.includes(email)) return context.tagToSocksId.get(rule.outboundTag);
+  }
+  for (const rule of rules) {
+    if (!rule || rule.enabled === false || !context.tagToSocksId.has(rule.outboundTag)) continue;
+    const ruleInboundTags = stringList(rule.inboundTag);
+    if (ruleInboundTags.some((tag) => inboundTags.has(tag))) return context.tagToSocksId.get(rule.outboundTag);
+  }
+  return '';
 }
 
 async function listXuiInboundsFull(server) {
@@ -918,15 +1144,18 @@ async function listXuiClients(server) {
   return { endpoint: inbounds.endpoint, items: inbounds.items.flatMap(clientsFromInbound), raw: inbounds.raw, warnings: errors };
 }
 
-function customerFromXuiClient(server, item) {
+function customerFromXuiClient(server, item, context = {}) {
   const client = item.client || item;
   const email = clientEmailOf(client);
   const inboundIds = inboundIdsOfClient(item, item.inboundId || item.inbound_id);
+  const inbound = context.inboundsById?.get(inboundIds[0]) || item.inbound || {};
+  const socksNodeId = resolveSocksNodeIdForClient(item, client, context);
+  const remark = clientRemarkOf(client);
   return {
     id: id('cus'),
-    name: email,
+    name: clientNameOf(client, email),
     contact: '',
-    packageName: '3-xui 导入',
+    packageName: String(client.groupName || client.group_name || client.packageName || '3-xui 导入').trim() || '3-xui 导入',
     amount: 0,
     expireAt: expiryIsoFromClient(client),
     trafficLimitGb: trafficGbFromClient(client),
@@ -934,8 +1163,8 @@ function customerFromXuiClient(server, item) {
     xuiServerId: server.id,
     inboundId: inboundIds[0] ? String(inboundIds[0]) : '',
     autoCreateInbound: false,
-    inboundPort: '',
-    inboundRemark: item.inbound?.remark || '',
+    inboundPort: inboundPortOf(inbound) ? String(inboundPortOf(inbound)) : '',
+    inboundRemark: inbound?.remark || '',
     inboundTemplate: 'vless-tcp',
     inboundSni: '',
     inboundHost: '',
@@ -946,10 +1175,10 @@ function customerFromXuiClient(server, item) {
     clientId: String(client.subId || client.sub_id || email).trim(),
     clientEmail: email,
     clientUuid: clientUuidOf(client) || crypto.randomUUID(),
-    protocol: String(client.protocol || item.inbound?.protocol || 'vless').trim() || 'vless',
-    useSocks: false,
-    socksNodeId: '',
-    remark: '从 3-xui 同步导入',
+    protocol: String(client.protocol || inbound?.protocol || 'vless').trim() || 'vless',
+    useSocks: Boolean(socksNodeId),
+    socksNodeId,
+    remark: remark || '从 3-xui 同步导入',
     createdAt: nowIso(),
     updatedAt: nowIso()
   };
@@ -958,30 +1187,79 @@ function customerFromXuiClient(server, item) {
 async function importCustomersFromXui(db, serverId) {
   const server = db.xuiServers.find((item) => item.id === serverId);
   if (!server) throw new Error('3x-ui 节点不存在');
+  const inbounds = await listXuiInboundsFull(server);
+  let xrayConfig = { outbounds: [], routing: { rules: [] } };
+  let xrayEndpoint = '';
+  let socksImport = { created: 0, updated: 0, tagToSocksId: new Map() };
+  try {
+    const template = await readXrayTemplate(server);
+    xrayConfig = template.config;
+    xrayEndpoint = withApiPrefix(server, '/panel/api/xray/');
+    socksImport = upsertSocksNodesFromXray(db, xrayConfig);
+  } catch (error) {
+    xrayConfig = { outbounds: [], routing: { rules: [] } };
+    xrayEndpoint = `读取失败：${error.message}`;
+  }
+  const inboundInfo = inboundContext(inbounds.items);
+  const context = {
+    xrayConfig,
+    tagToSocksId: socksImport.tagToSocksId,
+    inboundsById: inboundInfo.byId,
+    inboundTagToId: inboundInfo.tagToId
+  };
   const remote = await listXuiClients(server);
+  const indexedClients = clientIndexesFromInbounds(inbounds.items);
+  const remoteItems = expandClientImportItems(remote.items);
+  const remoteKeys = new Set(remoteItems.map((item) => {
+    const email = clientEmailOf(item.client || item);
+    return importAssociationKey(email, firstInboundIdOfImportItem(item));
+  }).filter((key) => !key.startsWith('::')));
+  for (const item of indexedClients.items) {
+    const email = clientEmailOf(item.client || item);
+    const key = importAssociationKey(email, firstInboundIdOfImportItem(item));
+    if (email && !remoteKeys.has(key)) remoteItems.push(item);
+  }
   let created = 0;
   let updated = 0;
   let skipped = 0;
+  let socksBound = 0;
   const seen = new Set();
-  for (const item of remote.items) {
-    const incoming = customerFromXuiClient(server, item);
-    if (!incoming.clientEmail || seen.has(incoming.clientEmail)) {
+  for (const rawItem of remoteItems) {
+    const rawClient = rawItem.client || rawItem;
+    const item = mergeClientImportItem(rawItem, indexedClientForImportItem(rawItem, indexedClients));
+    const incoming = customerFromXuiClient(server, item, context);
+    const associationKey = importAssociationKey(incoming.clientEmail, incoming.inboundId);
+    if (!incoming.clientEmail || seen.has(associationKey)) {
       skipped += 1;
       continue;
     }
-    seen.add(incoming.clientEmail);
-    const index = db.customers.findIndex((customer) => customer.xuiServerId === server.id && customer.clientEmail === incoming.clientEmail);
+    seen.add(associationKey);
+    if (incoming.useSocks && incoming.socksNodeId) socksBound += 1;
+    let index = db.customers.findIndex((customer) => customer.xuiServerId === server.id && customer.clientEmail === incoming.clientEmail && String(customer.inboundId || '') === String(incoming.inboundId || ''));
+    if (index < 0) {
+      index = db.customers.findIndex((customer) => customer.xuiServerId === server.id && customer.clientEmail === incoming.clientEmail && !customer.inboundId);
+    }
     if (index >= 0) {
       db.customers[index] = {
         ...db.customers[index],
+        name: incoming.name || db.customers[index].name,
+        contact: incoming.contact || db.customers[index].contact,
+        packageName: incoming.packageName || db.customers[index].packageName,
         expireAt: incoming.expireAt || db.customers[index].expireAt,
         trafficLimitGb: incoming.trafficLimitGb || db.customers[index].trafficLimitGb,
         status: incoming.status,
+        xuiServerId: incoming.xuiServerId || db.customers[index].xuiServerId,
         inboundId: incoming.inboundId || db.customers[index].inboundId,
+        inboundPort: incoming.inboundPort || db.customers[index].inboundPort,
         inboundRemark: incoming.inboundRemark || db.customers[index].inboundRemark,
+        inboundTemplate: incoming.inboundTemplate || db.customers[index].inboundTemplate,
         clientId: incoming.clientId || db.customers[index].clientId,
+        clientEmail: incoming.clientEmail || db.customers[index].clientEmail,
         clientUuid: incoming.clientUuid || db.customers[index].clientUuid,
         protocol: incoming.protocol || db.customers[index].protocol,
+        useSocks: incoming.useSocks,
+        socksNodeId: incoming.useSocks ? incoming.socksNodeId : '',
+        remark: incoming.remark || db.customers[index].remark,
         updatedAt: nowIso()
       };
       updated += 1;
@@ -990,8 +1268,8 @@ async function importCustomersFromXui(db, serverId) {
       created += 1;
     }
   }
-  addLog(db, server.id, 'import', 'success', `已从 3-xui 同步用户：新增 ${created}，更新 ${updated}，跳过 ${skipped}`, { endpoint: remote.endpoint });
-  return { endpoint: remote.endpoint, total: remote.items.length, created, updated, skipped };
+  addLog(db, server.id, 'import', 'success', `已从 3-xui 同步用户：新增 ${created}，更新 ${updated}，跳过 ${skipped}，绑定 SOCKS ${socksBound}`, { endpoint: remote.endpoint, xrayEndpoint, socksCreated: socksImport.created, socksUpdated: socksImport.updated });
+  return { endpoint: remote.endpoint, xrayEndpoint, total: remoteItems.length, created, updated, skipped, socksBound, socksCreated: socksImport.created, socksUpdated: socksImport.updated };
 }
 
 async function createXuiInbound(server, customer, currentInbounds) {
@@ -1048,7 +1326,8 @@ async function syncClientToXui(db, customer, action = 'upsert') {
     reset: 0
   };
 
-  const inboundIds = [inboundId];
+  const clientDetail = await getXuiClientDetail(server, customer.clientEmail);
+  const inboundIds = [...new Set([...clientDetail.inboundIds, inboundId])];
   const slimClient = {
     email: client.email,
     enable: client.enable,
@@ -1064,7 +1343,7 @@ async function syncClientToXui(db, customer, action = 'upsert') {
   const slimPayload = { client: slimClient, inboundIds };
   const updatePayload = { ...client, inboundIds };
   const email = encodeURIComponent(customer.clientEmail);
-  const exists = await xuiClientExists(server, customer.clientEmail);
+  const exists = Boolean(clientDetail.exists);
 
   const updateRoutes = [
     server.updateClientEndpoint ? { endpoint: server.updateClientEndpoint.replace('{clientId}', email).replace('{email}', email), body: updatePayload } : null,
@@ -1166,6 +1445,185 @@ async function deleteXuiClient(server, email) {
   throw new Error(`删除 3-xui client 失败，已尝试：${errors.join(' | ') || '无详细错误'}`);
 }
 
+function clientStillInInbound(inbound, target) {
+  return clientsFromInbound(inbound).some((item) => clientMatchesTarget(item.client, target));
+}
+
+function shouldTryInboundClientDelete(inbound, target) {
+  const clients = clientsFromInbound(inbound || {});
+  if (!clients.length) return false;
+  return clients.some((item) => clientMatchesTarget(item.client, target)) || clients.length === 1;
+}
+
+function clientPreview(client) {
+  if (!client || !Object.keys(client).length) return null;
+  return {
+    email: clientEmailOf(client),
+    uuid: clientUuidOf(client),
+    subId: clientSubIdOf(client)
+  };
+}
+
+async function getXuiInboundById(server, inboundId) {
+  const idValue = Number(inboundId);
+  if (!Number.isInteger(idValue) || idValue <= 0) return null;
+  try {
+    const result = await xuiRequest(server, withApiPrefix(server, `/panel/api/inbounds/get/${idValue}`), { method: 'GET' });
+    const object = xuiObject(result.data);
+    return object && Object.keys(object).length ? object : null;
+  } catch (error) {
+    if (/record not found|not found|404/i.test(error.message)) return null;
+    throw error;
+  }
+}
+
+async function deleteInboundClientLegacy(server, target, inboundId) {
+  const idValue = Number(inboundId);
+  const email = String(target?.email || target?.clientEmail || '').trim();
+  if (!email || !Number.isInteger(idValue) || idValue <= 0) return { skipped: true, reason: '缺少 Email 或 Inbound ID' };
+  let inbound = await getXuiInboundById(server, idValue);
+  if (!inbound) {
+    const inbounds = await listXuiInboundsFull(server);
+    inbound = inbounds.items.find((item) => inboundIdOf(item) === idValue);
+  }
+  const inboundClients = clientsFromInbound(inbound || {});
+  let matchedBy = '字段匹配';
+  let clientItem = inboundClients.find((item) => clientMatchesTarget(item.client, target));
+  if (!clientItem && inboundClients.length === 1) {
+    clientItem = inboundClients[0];
+    matchedBy = '入站唯一客户端兜底';
+  }
+  const client = clientItem?.client || {};
+  const actualTarget = clientItem ? { ...target, detailClient: client, email: clientEmailOf(client) || email } : target;
+  const identifiers = clientIdentifierValues(client, [
+    target.clientUuid,
+    target.clientId,
+    target.subId,
+    email
+  ]).filter((value) => !/^\d+$/.test(value) || String(client?.id || '').trim() === value);
+  const routes = uniqueRoutes(identifiers.flatMap((identifier) => {
+    const encoded = encodeURIComponent(identifier);
+    return [
+      { endpoint: withApiPrefix(server, `/panel/api/inbounds/${idValue}/delClient/${encoded}`), method: 'POST' },
+      { endpoint: withApiPrefix(server, `/panel/api/inbounds/delClient/${idValue}/${encoded}`), method: 'POST' },
+      { endpoint: withApiPrefix(server, `/panel/api/inbounds/${idValue}/client/${encoded}`), method: 'DELETE' },
+      { endpoint: withApiPrefix(server, `/panel/api/clients/del/${encoded}`), method: 'POST' },
+      { endpoint: withApiPrefix(server, `/panel/api/clients/del/${encoded}`), method: 'DELETE' }
+    ];
+  }));
+  if (!routes.length) return { skipped: true, reason: '没有可用于删除的客户端标识', matchedBy, resolvedClient: clientPreview(client) };
+  const errors = [];
+  let missing = null;
+  for (const route of routes) {
+    try {
+      const result = await xuiRequest(server, route.endpoint, { method: route.method });
+      const refreshed = await getXuiInboundById(server, idValue);
+      if (!refreshed || !clientStillInInbound(refreshed, actualTarget)) {
+        return { deleted: true, legacy: true, endpoint: route.endpoint, method: route.method, identifier: route.endpoint.split('/').pop(), matchedBy, resolvedClient: clientPreview(client), result: result.data };
+      }
+      errors.push(`${route.method} ${route.endpoint}: 接口返回成功，但客户端仍在入站中`);
+    } catch (error) {
+      if (/record not found|not found|404/i.test(error.message)) {
+        missing = { deleted: false, missing: true, endpoint: route.endpoint, method: route.method };
+        continue;
+      }
+      errors.push(`${route.method} ${route.endpoint}: ${error.message}`);
+    }
+  }
+  if (missing && !errors.length) return { ...missing, matchedBy, resolvedClient: clientPreview(client) };
+  throw new Error(`旧版入站客户端删除失败，已尝试：${errors.join(' | ') || '无详细错误'}`);
+}
+
+async function detachXuiClient(server, customer) {
+  const email = String(customer?.clientEmail || customer?.email || '').trim();
+  if (!email) return { skipped: true, reason: '没有 Client Email' };
+  const inboundIds = [Number(customer?.inboundId)].filter((value) => Number.isInteger(value) && value > 0);
+  if (!inboundIds.length) return deleteXuiClient(server, email);
+  const detail = await getXuiClientDetail(server, email);
+  const target = {
+    email,
+    clientEmail: email,
+    clientId: customer?.clientId,
+    clientUuid: customer?.clientUuid,
+    detailClient: detail.client
+  };
+  const attachedInboundIds = detail.inboundIds.map((value) => Number(value)).filter((value) => Number.isInteger(value) && value > 0);
+  if (!detail.exists || !attachedInboundIds.length || attachedInboundIds.every((value) => inboundIds.includes(value))) {
+    const clientResult = await deleteXuiClient(server, email);
+    const inbound = await getXuiInboundById(server, inboundIds[0]);
+    if (!inbound || !shouldTryInboundClientDelete(inbound, target)) return clientResult;
+    const legacyResult = await deleteInboundClientLegacy(server, target, inboundIds[0]);
+    return { ...clientResult, verified: false, fallback: legacyResult };
+  }
+  const encoded = encodeURIComponent(email);
+  const routes = uniqueRoutes([
+    { endpoint: withApiPrefix(server, `/panel/api/clients/${encoded}/detach`), body: { inboundIds } },
+    { endpoint: withApiPrefix(server, `/panel/api/clients/${encoded}/detach`), body: { inbound_ids: inboundIds } }
+  ]);
+  const errors = [];
+  let missing = null;
+  for (const route of routes) {
+    try {
+      const result = await xuiRequest(server, route.endpoint, { method: 'POST', body: route.body });
+      const inbound = await getXuiInboundById(server, inboundIds[0]);
+      if (!inbound || !shouldTryInboundClientDelete(inbound, target)) return { detached: true, endpoint: route.endpoint, inboundIds, result: result.data };
+      const legacyResult = await deleteInboundClientLegacy(server, target, inboundIds[0]);
+      return { detached: true, verified: false, endpoint: route.endpoint, inboundIds, result: result.data, fallback: legacyResult };
+    } catch (error) {
+      if (/record not found|not found|404/i.test(error.message)) {
+        missing = { detached: false, missing: true, endpoint: route.endpoint, inboundIds };
+        continue;
+      }
+      errors.push(`${route.endpoint}: ${error.message}`);
+    }
+  }
+  if (missing && !errors.length) {
+    const inbound = await getXuiInboundById(server, inboundIds[0]);
+    if (inbound && shouldTryInboundClientDelete(inbound, target)) {
+      const legacyResult = await deleteInboundClientLegacy(server, target, inboundIds[0]);
+      return { ...missing, verified: false, fallback: legacyResult };
+    }
+    return missing;
+  }
+  throw new Error(`解绑 3-xui client 入站失败，已尝试：${errors.join(' | ') || '无详细错误'}`);
+}
+
+async function deleteXuiInbound(server, inboundId) {
+  const idValue = Number(inboundId);
+  if (!Number.isInteger(idValue) || idValue <= 0) return { skipped: true, reason: '没有有效 Inbound ID' };
+  const routes = uniqueRoutes([
+    { endpoint: withApiPrefix(server, `/panel/api/inbounds/del/${idValue}`), method: 'POST' },
+    { endpoint: withApiPrefix(server, `/panel/api/inbounds/del/${idValue}`), method: 'DELETE' }
+  ]);
+  const errors = [];
+  let missing = null;
+  for (const route of routes) {
+    try {
+      const result = await xuiRequest(server, route.endpoint, { method: route.method });
+      return { deleted: true, endpoint: route.endpoint, method: route.method, result: result.data };
+    } catch (error) {
+      if (/record not found|not found|404/i.test(error.message)) {
+        missing = { deleted: false, missing: true, endpoint: route.endpoint, method: route.method };
+        continue;
+      }
+      errors.push(`${route.method} ${route.endpoint}: ${error.message}`);
+    }
+  }
+  if (missing && !errors.length) return missing;
+  throw new Error(`删除 3-xui 入站失败，已尝试：${errors.join(' | ') || '无详细错误'}`);
+}
+
+async function deleteInboundIfEmpty(server, inboundId) {
+  const idValue = Number(inboundId);
+  if (!Number.isInteger(idValue) || idValue <= 0) return { skipped: true, reason: '没有有效 Inbound ID' };
+  const inbounds = await listXuiInboundsFull(server);
+  const inbound = inbounds.items.find((item) => inboundIdOf(item) === idValue);
+  if (!inbound) return { skipped: true, missing: true, reason: '入站已经不存在' };
+  const clients = clientsFromInbound(inbound);
+  if (clients.length) return { skipped: true, reason: `入站仍有 ${clients.length} 个客户端，未删除入站` };
+  return deleteXuiInbound(server, idValue);
+}
+
 function outboundTagStillUsed(db, customer, config, socks) {
   if (!socks?.tag) return true;
   const usedByRules = Array.isArray(config.routing?.rules) && config.routing.rules.some((rule) => rule?.outboundTag === socks.tag);
@@ -1213,12 +1671,37 @@ async function cleanupCustomerSocksFromXui(db, customer, server) {
 }
 
 async function cleanupCustomerRemoteResources(db, customer) {
-  if (!customer?.xuiServerId) return { skipped: true, reason: '用户没有绑定 3x-ui 节点' };
+  if (!customer?.xuiServerId) return { skipped: true, reason: '用户没有绑定 3x-ui 节点', warnings: [] };
   const server = db.xuiServers.find((item) => item.id === customer.xuiServerId);
-  if (!server) throw new Error('用户绑定的 3x-ui 节点不存在，无法同步删除远程资源');
-  const socksResult = await cleanupCustomerSocksFromXui(db, customer, server);
-  const clientResult = await deleteXuiClient(server, customer.clientEmail);
-  return { clientResult, socksResult };
+  if (!server) return { skipped: true, reason: '用户绑定的 3x-ui 节点不存在，已跳过远程清理', warnings: ['用户绑定的 3x-ui 节点不存在'] };
+
+  const warnings = [];
+  let socksResult = { skipped: true };
+  let clientResult = { skipped: true };
+  let inboundResult = { skipped: true };
+
+  try {
+    socksResult = await cleanupCustomerSocksFromXui(db, customer, server);
+  } catch (error) {
+    socksResult = { failed: true, error: error.message };
+    warnings.push(`SOCKS 路由清理失败：${error.message}`);
+  }
+
+  try {
+    clientResult = await detachXuiClient(server, customer);
+  } catch (error) {
+    clientResult = { failed: true, error: error.message };
+    warnings.push(`3-xui 客户端删除/解绑失败：${error.message}`);
+  }
+
+  try {
+    inboundResult = await deleteInboundIfEmpty(server, customer.inboundId);
+  } catch (error) {
+    inboundResult = { failed: true, error: error.message };
+    warnings.push(`3-xui 空入站删除失败：${error.message}`);
+  }
+
+  return { clientResult, socksResult, inboundResult, warnings };
 }
 
 function buildSocksOutbound(socks) {
@@ -1548,17 +2031,12 @@ async function routeApi(req, res, url) {
   if (customerMatch && req.method === 'DELETE') {
     const customer = db.customers.find((item) => item.id === customerMatch[1]);
     if (!customer) return sendError(res, 404, '用户不存在');
-    try {
-      const cleanup = await cleanupCustomerRemoteResources(db, customer);
-      db.customers = db.customers.filter((item) => item.id !== customerMatch[1]);
-      addLog(db, customer.id, 'delete', 'success', '用户已删除，并已同步清理 3-xui 资源', cleanup);
-      await writeDb(db);
-      return send(res, 200, { ok: true, data: publicDb(db), detail: cleanup });
-    } catch (error) {
-      addLog(db, customer.id, 'delete', 'failed', error.message);
-      await writeDb(db);
-      return sendError(res, error.statusCode || 500, '删除失败，已保留本地用户', error.message);
-    }
+    const cleanup = await cleanupCustomerRemoteResources(db, customer);
+    db.customers = db.customers.filter((item) => item.id !== customerMatch[1]);
+    const hasWarnings = Array.isArray(cleanup.warnings) && cleanup.warnings.length > 0;
+    addLog(db, customer.id, 'delete', hasWarnings ? 'warning' : 'success', hasWarnings ? '本地用户已删除，远程清理存在警告' : '用户已删除，并已同步清理 3-xui 资源', cleanup);
+    await writeDb(db);
+    return send(res, 200, { ok: true, data: publicDb(db), detail: cleanup, warning: hasWarnings ? cleanup.warnings.join('；') : '' });
   }
 
   const renewMatch = url.pathname.match(/^\/api\/customers\/([^/]+)\/renew$/);
