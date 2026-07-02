@@ -4,6 +4,7 @@ data/.secret
 app.log
 node_modules/
 .env
+*.zip
+*.tar.gz
 .DS_Store
 Thumbs.db
-

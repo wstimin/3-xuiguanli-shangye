@@ -53,6 +53,15 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .login-card p { margin: 0 0 24px; color: var(--muted); line-height: 1.7; }
 .login-submit { width: 100%; }
 
+.setup-card { width: min(620px, 100%); }
+.setup-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 150px;
+  gap: 14px;
+  margin-bottom: 18px;
+}
+.setup-grid .full { grid-column: 1 / -1; }
+
 .app-shell {
   display: grid;
   grid-template-columns: 248px 1fr;
@@ -323,6 +332,14 @@ tr:last-child td { border-bottom: 0; }
 .status.failed { color: var(--red); background: #ffeaea; }
 .status.success { color: var(--green); background: #e8f7ef; }
 
+.success-text { color: var(--green); }
+.danger-text { color: var(--red); }
+
+.finance-mini-grid h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+}
+
 .btn {
   border: 1px solid var(--line);
   background: var(--surface);
@@ -344,6 +361,8 @@ tr:last-child td { border-bottom: 0; }
 .btn.primary:hover { background: var(--blue-dark); border-color: var(--blue-dark); }
 .btn.danger { color: var(--red); border-color: #efb9b9; }
 .btn.danger:hover { background: #fff5f5; }
+.btn.danger.solid { background: var(--red); color: white; border-color: var(--red); }
+.btn.danger.solid:hover { background: #b91c1c; border-color: #b91c1c; }
 .btn.small { height: 30px; padding: 0 9px; font-size: 12px; border-radius: 7px; }
 .btn.icon { width: 36px; padding: 0; font-size: 18px; }
 .btn.large-btn { height: 88px; font-size: 18px; }
@@ -417,6 +436,61 @@ input[type="checkbox"] { width: auto; height: auto; }
   justify-content: flex-end;
   gap: 8px;
   background: #fbfcfe;
+}
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(16, 24, 40, .42);
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  z-index: 30;
+}
+
+.modal-card {
+  width: min(440px, 100%);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 24px 72px rgba(16,24,40,.28);
+  padding: 20px;
+}
+
+.modal-icon {
+  width: 38px;
+  height: 38px;
+  border-radius: 999px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 12px;
+  background: #eef5ff;
+  color: var(--blue);
+  font-weight: 900;
+}
+
+.modal-icon.danger { background: #fff1f1; color: var(--red); }
+
+.modal-content h2 {
+  margin: 0 0 8px;
+  font-size: 18px;
+}
+
+.modal-content p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.7;
+  font-size: 14px;
+}
+
+.modal-field { margin-top: 16px; margin-bottom: 0; }
+
+.modal-card footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 20px;
 }
 
 .form-section {

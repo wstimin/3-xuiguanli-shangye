@@ -1,4 +1,5 @@
 const app = document.querySelector('#app');
+const entryMode = document.body.dataset.entry || 'user';
 
 if (location.protocol === 'file:') {
   app.innerHTML = `
@@ -17,10 +18,21 @@ const state = {
   view: 'customers',
   userView: 'user-home',
   db: null,
+  setupRequired: false,
+  setupForm: {
+    host: '127.0.0.1',
+    port: '3306',
+    database: 'shiye_management',
+    user: 'shiye',
+    password: ''
+  },
   drawer: null,
+  modal: null,
   search: '',
   toast: ''
 };
+
+let modalResolver = null;
 
 const statusText = {
   active: '正常',
@@ -37,6 +49,7 @@ const statusText = {
 const adminNavItems = [
   ['customers', '用户管理', 'U'],
   ['cards', '卡密管理', 'C'],
+  ['finance', '财务流水', 'F'],
   ['servers', '3x-ui 节点', 'N'],
   ['socks', 'SOCKS 出站', 'S'],
   ['logs', '同步日志', 'L']
@@ -81,10 +94,42 @@ function toast(message) {
   }, 3600);
 }
 
+function openModal(options) {
+  state.modal = {
+    title: options.title || '请确认',
+    message: options.message || '',
+    tone: options.tone || 'default',
+    input: options.input || null,
+    confirmText: options.confirmText || '确定',
+    cancelText: options.cancelText || '取消'
+  };
+  render();
+  return new Promise((resolve) => {
+    modalResolver = resolve;
+    requestAnimationFrame(() => document.querySelector('[data-modal-input]')?.focus());
+  });
+}
+
+function closeModal(value) {
+  state.modal = null;
+  const resolve = modalResolver;
+  modalResolver = null;
+  render();
+  if (resolve) resolve(value);
+}
+
+function confirmDialog(title, message, options = {}) {
+  return openModal({ title, message, tone: options.tone, confirmText: options.confirmText, cancelText: options.cancelText });
+}
+
+function promptDialog(title, message, value = '') {
+  return openModal({ title, message, input: { value }, confirmText: '保存' });
+}
+
 async function api(path, options = {}) {
   const response = await fetch(path, {
     ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    headers: { 'Content-Type': 'application/json', 'X-Entry-Mode': entryMode, ...(options.headers || {}) },
     body: options.body ? JSON.stringify(options.body) : undefined
   });
   const data = await response.json().catch(() => ({}));
@@ -110,7 +155,17 @@ async function copyText(text) {
 
 async function bootstrap() {
   try {
-    const result = await api('/api/bootstrap');
+    const setup = await api('/api/setup/status');
+    if (!setup.installed) {
+      state.setupRequired = true;
+      state.user = null;
+      state.role = '';
+      state.db = null;
+      renderSetup();
+      return;
+    }
+    state.setupRequired = false;
+    const result = await api(`/api/bootstrap?entry=${encodeURIComponent(entryMode)}`);
     state.user = result.user;
     state.role = result.role || 'admin';
     state.db = result.data;
@@ -124,8 +179,51 @@ async function bootstrap() {
   }
 }
 
+function renderSetup() {
+  const setup = state.setupForm;
+  app.innerHTML = `
+    <section class="login-wrap setup-wrap">
+      <form class="login-card setup-card" id="setupForm">
+        <h1>首次安装</h1>
+        <p>填写 MySQL 数据库信息，系统会测试连接并自动创建所需数据表。1Panel、宝塔面板部署时推荐使用这个向导完成绑定。</p>
+        <div class="setup-grid">
+          <div class="field"><label>数据库地址</label><input name="host" value="${h(setup.host)}" required></div>
+          <div class="field"><label>端口</label><input name="port" type="number" value="${h(setup.port)}" min="1" required></div>
+          <div class="field"><label>数据库名称</label><input name="database" value="${h(setup.database)}" required></div>
+          <div class="field"><label>数据库账号</label><input name="user" value="${h(setup.user)}" autocomplete="username" required></div>
+          <div class="field full"><label>数据库密码</label><input name="password" type="password" value="${h(setup.password)}" autocomplete="current-password"></div>
+        </div>
+        <button class="btn primary login-submit" type="submit">连接并安装</button>
+      </form>
+      ${state.toast ? `<div class="toast">${h(state.toast)}</div>` : ''}
+    </section>`;
+
+  const setupForm = document.querySelector('#setupForm');
+  setupForm.addEventListener('input', (event) => {
+    if (!event.target.name) return;
+    state.setupForm[event.target.name] = event.target.value;
+  });
+  setupForm.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    state.setupForm = { ...state.setupForm, ...Object.fromEntries(form) };
+    const button = event.currentTarget.querySelector('button[type="submit"]');
+    button.disabled = true;
+    button.textContent = '正在安装...';
+    try {
+      await api('/api/setup/install', { method: 'POST', body: Object.fromEntries(form) });
+      toast('安装完成，请使用管理员账号登录');
+      await bootstrap();
+    } catch (error) {
+      toast(error.message);
+      button.disabled = false;
+      button.textContent = '连接并安装';
+    }
+  });
+}
+
 async function refresh() {
-  const result = await api('/api/bootstrap');
+  const result = await api(`/api/bootstrap?entry=${encodeURIComponent(entryMode)}`);
   state.user = result.user;
   state.role = result.role || state.role;
   state.db = result.data;
@@ -136,8 +234,8 @@ function renderLogin() {
   app.innerHTML = `
     <section class="login-wrap">
       <form class="login-card" id="loginForm">
-        <h1>十夜管理系统</h1>
-        <p>管理员使用后台账号登录，用户使用管理员创建的账号登录。用户端不开放注册。</p>
+        <h1>${entryMode === 'admin' ? '十夜管理系统' : '十夜用户中心'}</h1>
+        <p>${entryMode === 'admin' ? '管理员后台入口。普通用户请从用户中心登录。' : '用户使用管理员创建的账号登录。用户端不开放注册。'}</p>
         <div class="field"><label>账号</label><input name="username" autocomplete="username" required></div>
         <div class="field"><label>密码</label><input name="password" type="password" autocomplete="current-password" required></div>
         <button class="btn primary login-submit" type="submit">登录</button>
@@ -149,7 +247,7 @@ function renderLogin() {
     event.preventDefault();
     const form = new FormData(event.currentTarget);
     try {
-      await api('/api/login', { method: 'POST', body: Object.fromEntries(form) });
+      await api('/api/login', { method: 'POST', body: { ...Object.fromEntries(form), entry: entryMode } });
       await bootstrap();
     } catch (error) {
       toast(error.message);
@@ -158,6 +256,7 @@ function renderLogin() {
 }
 
 function render() {
+  if (state.setupRequired) return renderSetup();
   if (!state.db) return renderLogin();
   if (state.role === 'user') return renderUserApp();
   return renderAdminApp();
@@ -171,6 +270,7 @@ function pageTitle() {
   return {
     customers: '用户管理',
     cards: '卡密管理',
+    finance: '财务流水',
     servers: '3x-ui 节点',
     socks: 'SOCKS 出站',
     logs: '同步日志'
@@ -195,7 +295,7 @@ function renderAdminApp() {
       <aside class="sidebar">
         <div class="brand"><span class="brand-mark">十夜</span><span>管理系统</span></div>
         <nav class="nav">${adminNavItems.map(([view, label, icon]) => navButton(view, label, icon, state.view)).join('')}</nav>
-        <div class="sidebar-footer">登录用户：${h(state.user)}<br>版本：0.3.0<br>数据存储：data/db.json</div>
+        <div class="sidebar-footer">登录用户：${h(state.user)}<br>版本：0.3.0<br>数据存储：服务器数据库</div>
       </aside>
       <section class="content">
         <div class="topbar">
@@ -205,7 +305,7 @@ function renderAdminApp() {
             <div class="sub">管理员后台管理用户、卡密、3x-ui 节点和 SOCKS 中转。</div>
           </div>
           <div class="actions">
-            <button class="btn" data-action="disable-expired">到期停用</button>
+            <button class="btn" data-action="disable-expired">停用过期用户</button>
             <button class="btn" data-action="refresh">刷新</button>
             <button class="btn" data-action="settings">系统设置</button>
             <button class="btn" data-action="security">账号安全</button>
@@ -224,12 +324,14 @@ function renderAdminApp() {
       </section>
     </section>
     ${state.drawer ? renderDrawer() : ''}
+    ${state.modal ? renderModal() : ''}
     ${state.toast ? `<div class="toast">${h(state.toast)}</div>` : ''}`;
   bindEvents();
 }
 
 function renderAdminView() {
   if (state.view === 'cards') return renderCards();
+  if (state.view === 'finance') return renderFinance();
   if (state.view === 'servers') return renderServers();
   if (state.view === 'socks') return renderSocks();
   if (state.view === 'logs') return renderLogs();
@@ -274,6 +376,7 @@ function customerRow(customer) {
     <td><span class="status ${customer.computedStatus}">${statusText[customer.computedStatus] || customer.computedStatus}</span></td>
     <td><div class="row-actions">
       <button class="btn small primary" data-action="renew" data-id="${customer.id}">续费</button>
+      <button class="btn small" data-action="adjust-balance" data-id="${customer.id}">调余额</button>
       <button class="btn small" data-action="sync" data-id="${customer.id}">同步</button>
       <button class="btn small" data-action="edit-customer" data-id="${customer.id}">编辑</button>
       <button class="btn small" data-action="toggle" data-id="${customer.id}">${customer.status === 'disabled' ? '启用' : '停用'}</button>
@@ -282,9 +385,39 @@ function customerRow(customer) {
   </tr>`;
 }
 
+function balanceTypeText(type) {
+  return {
+    card_redeem: '卡密充值',
+    user_renew: '用户续费',
+    admin_add: '管理员增加',
+    admin_subtract: '管理员扣减',
+    admin_set: '管理员设置'
+  }[type] || type || '-';
+}
+
+function renewalSourceText(source) {
+  return { user: '用户自助', admin: '管理员' }[source] || source || '-';
+}
+
+function renderFinance() {
+  const balanceLogs = state.db.balanceLogs || [];
+  const renewalLogs = state.db.renewalLogs || [];
+  return `
+    <section class="panel">
+      <div class="panel-head"><div><h2>余额流水</h2><p>记录卡密充值、用户续费扣款和管理员手动调整余额。</p></div></div>
+      <table><thead><tr><th style="width:160px">时间</th><th style="width:150px">用户</th><th style="width:110px">类型</th><th style="width:110px">变动</th><th style="width:190px">余额变化</th><th style="width:120px">操作人</th><th>备注</th></tr></thead>
+      <tbody>${balanceLogs.length ? balanceLogs.map((log) => `<tr><td>${fmtDate(log.createdAt)}</td><td>${h(log.customerName || log.customerId || '-')}</td><td>${h(balanceTypeText(log.type))}</td><td class="mono ${Number(log.amount || 0) < 0 ? 'danger-text' : 'success-text'}">${Number(log.amount || 0) > 0 ? '+' : ''}${money(log.amount)}</td><td class="mono">${money(log.beforeBalance)} → ${money(log.afterBalance)}</td><td>${h(log.operator || '-')}</td><td>${h(log.remark || '-')}</td></tr>`).join('') : `<tr><td colspan="7" class="empty">还没有余额流水。</td></tr>`}</tbody></table>
+    </section>
+    <section class="panel">
+      <div class="panel-head"><div><h2>续费记录</h2><p>记录用户自助续费和管理员后台续费，便于对账。</p></div></div>
+      <table><thead><tr><th style="width:160px">时间</th><th style="width:150px">用户</th><th style="width:90px">来源</th><th style="width:80px">月数</th><th style="width:110px">金额</th><th style="width:250px">到期变化</th><th style="width:90px">状态</th><th>说明</th></tr></thead>
+      <tbody>${renewalLogs.length ? renewalLogs.map((log) => `<tr><td>${fmtDate(log.createdAt)}</td><td>${h(log.customerName || log.customerId || '-')}</td><td>${h(renewalSourceText(log.source))}</td><td>${h(log.months || 1)}</td><td>${money(log.price)} ${h(state.db.settings.currency)}</td><td>${fmtDate(log.beforeExpireAt)} → ${fmtDate(log.afterExpireAt)}</td><td><span class="status ${log.status === 'warning' ? 'warning' : log.status === 'success' ? 'success' : 'active'}">${statusText[log.status] || log.status || '-'}</span></td><td>${h(log.message || '-')}</td></tr>`).join('') : `<tr><td colspan="8" class="empty">还没有续费记录。</td></tr>`}</tbody></table>
+    </section>`;
+}
+
 function cardType(card) {
   const fallback = `${money(card.amount)} ${state.db.settings.currency || 'CNY'}`;
-  return String(card.type || card.remark || fallback).trim() || fallback;
+  return String(card.batchName || card.type || card.remark || fallback).trim() || fallback;
 }
 
 function cardGroups() {
@@ -316,7 +449,8 @@ function getCardGroup(index) {
   const entry = cardGroups()[Number(index)];
   if (!entry) return null;
   const [type, cards] = entry;
-  return { type, cards };
+  const batchId = cards[0]?.batchId && cards.every((card) => card.batchId === cards[0].batchId) ? cards[0].batchId : '';
+  return { type, cards, batchId };
 }
 
 function renderCards() {
@@ -325,7 +459,7 @@ function renderCards() {
   return `
     <div class="toolbar">
       <div class="toolbar-left"><span class="muted">未使用 ${unused} 张，已使用 ${used} 张</span></div>
-      <div class="toolbar-right"><button class="btn" data-action="settings">购买链接设置</button><button class="btn primary" data-action="generate-cards">+ 生成卡密</button></div>
+      <div class="toolbar-right"><button class="btn" data-action="card-link-settings">购买链接</button><button class="btn primary" data-action="generate-cards">+ 生成卡密</button></div>
     </div>
     ${renderCardGroups()}
     <section class="panel">
@@ -431,6 +565,7 @@ function renderUserApp() {
         ${renderUserView()}
       </section>
     </section>
+    ${state.modal ? renderModal() : ''}
     ${state.toast ? `<div class="toast">${h(state.toast)}</div>` : ''}`;
   bindEvents();
 }
@@ -484,6 +619,19 @@ function renderUserHome() {
       </form>
       ${canRenew ? '' : '<div class="form-note">当前账号还没有可续费节点，或管理员还没有设置节点价格。</div>'}
     </div>
+  </section>
+  ${renderUserFinanceLogs()}`;
+}
+
+function renderUserFinanceLogs() {
+  const balanceLogs = state.db.balanceLogs || [];
+  const renewalLogs = state.db.renewalLogs || [];
+  return `<section class="panel compact-panel">
+    <div class="panel-head"><div><h2>账户记录</h2><p>这里只显示当前账号自己的充值和续费记录。</p></div></div>
+    <div class="grid-2 finance-mini-grid">
+      <div><h3>余额流水</h3><table><thead><tr><th>时间</th><th>类型</th><th>变动</th><th>余额</th></tr></thead><tbody>${balanceLogs.length ? balanceLogs.map((log) => `<tr><td>${fmtDate(log.createdAt)}</td><td>${h(balanceTypeText(log.type))}</td><td class="mono ${Number(log.amount || 0) < 0 ? 'danger-text' : 'success-text'}">${Number(log.amount || 0) > 0 ? '+' : ''}${money(log.amount)}</td><td>${money(log.afterBalance)}</td></tr>`).join('') : `<tr><td colspan="4" class="empty">暂无余额流水。</td></tr>`}</tbody></table></div>
+      <div><h3>续费记录</h3><table><thead><tr><th>时间</th><th>月数</th><th>金额</th><th>到期</th></tr></thead><tbody>${renewalLogs.length ? renewalLogs.map((log) => `<tr><td>${fmtDate(log.createdAt)}</td><td>${h(log.months || 1)}</td><td>${money(log.price)} ${h(state.db.settings.currency)}</td><td>${fmtDate(log.afterExpireAt)}</td></tr>`).join('') : `<tr><td colspan="4" class="empty">暂无续费记录。</td></tr>`}</tbody></table></div>
+    </div>
   </section>`;
 }
 
@@ -505,8 +653,10 @@ function renderDrawer() {
     server: item ? '编辑 3x-ui 节点' : '添加 3x-ui 节点',
     socks: item ? '编辑 SOCKS 出站' : '添加 SOCKS 出站',
     cards: '生成卡密',
+    cardLink: '购买链接',
     settings: '系统设置',
     renew: '用户续费',
+    balance: '调整余额',
     security: '账号安全'
   }[type];
   return `<div class="drawer-backdrop" data-drawer-backdrop>
@@ -518,21 +668,45 @@ function renderDrawer() {
   </div>`;
 }
 
+function renderModal() {
+  const modal = state.modal || {};
+  const hasInput = Boolean(modal.input);
+  const confirmClass = modal.tone === 'danger' ? 'btn danger solid' : 'btn primary';
+  return `<div class="modal-backdrop" data-modal-backdrop>
+    <form class="modal-card" id="modalForm">
+      <div class="modal-icon ${h(modal.tone || 'default')}">${modal.tone === 'danger' ? '!' : '?'}</div>
+      <div class="modal-content">
+        <h2>${h(modal.title)}</h2>
+        ${modal.message ? `<p>${h(modal.message)}</p>` : ''}
+        ${hasInput ? `<div class="field modal-field"><label>名称</label><input data-modal-input value="${h(modal.input.value || '')}" required></div>` : ''}
+      </div>
+      <footer><button class="btn" type="button" data-action="cancel-modal">${h(modal.cancelText || '取消')}</button><button class="${confirmClass}" type="submit">${h(modal.confirmText || '确定')}</button></footer>
+    </form>
+  </div>`;
+}
+
 function renderSection(title, body) {
   return `<div class="form-section"><div class="section-title">${title}</div>${body}</div>`;
 }
 
 function drawerFields(type, item = {}) {
   if (type === 'settings') {
+    return `${renderSection('系统入口', `
+      <div class="field"><label>管理员入口路径</label><input name="adminPath" value="${h(state.db.settings.adminPath || '/admin')}" placeholder="/admin"></div>
+      <div class="form-note">保存后新的管理员入口立即生效，例如 /admin 或 /myadmin2026。当前页面刷新后请使用新路径进入后台。</div>
+    `)}${renderSection('基础设置', `
+      <div class="grid-2"><div class="field"><label>货币单位</label><input name="currency" value="${h(state.db.settings.currency || 'CNY')}"></div><div class="field"><label>到期提醒天数</label><input name="expiryWarningDays" type="number" min="1" value="${h(state.db.settings.expiryWarningDays || 3)}"></div></div>
+    `)}`;
+  }
+  if (type === 'cardLink') {
     return `${renderSection('用户端购买链接', `
       <div class="field"><label>购买卡密链接</label><input name="purchaseCardUrl" value="${h(state.db.settings.purchaseCardUrl)}" placeholder="https://你的发卡网站.example.com"></div>
       <div class="form-note">用户点击“购买卡密”按钮时，会直接跳转到这个链接。</div>
-    `)}${renderSection('基础设置', `
-      <div class="grid-2"><div class="field"><label>货币</label><input name="currency" value="${h(state.db.settings.currency || 'CNY')}"></div><div class="field"><label>到期提醒天数</label><input name="expiryWarningDays" type="number" min="1" value="${h(state.db.settings.expiryWarningDays || 3)}"></div></div>
     `)}`;
   }
   if (type === 'cards') {
     return `${renderSection('生成卡密', `
+      <input type="hidden" name="batchId" value="${h(item.batchId || '')}">
       <div class="grid-3"><div class="field"><label>金额</label><input name="amount" type="number" min="0.01" step="0.01" value="${h(item.amount || 10)}" required></div><div class="field"><label>数量</label><input name="count" type="number" min="1" max="500" value="1" required></div><div class="field"><label>前缀</label><input name="prefix" placeholder="可选"></div></div>
       <div class="field"><label>分类</label><input name="type" value="${h(item.type || '')}" placeholder="例如：50元卡密 / 月卡 / 活动卡"></div>
       <div class="field"><label>备注</label><input name="remark" value="${h(item.remark || '')}" placeholder="例如：7 月活动"></div>
@@ -549,6 +723,8 @@ function drawerFields(type, item = {}) {
       ${renderSection('认证信息', `
         <div class="grid-2"><div class="field"><label>账号</label><input name="username" value="${h(item.username)}"></div><div class="field"><label>密码</label><input name="password" type="password" value="${h(item.password)}"></div></div>
         <div class="field"><label>API Token</label><input name="apiToken" type="password" value="${h(item.apiToken)}"></div>
+        <div class="grid-2"><div class="field"><label>默认 TLS 证书路径</label><input name="defaultInboundCertFile" value="${h(item.defaultInboundCertFile)}" placeholder="/root/cert/fullchain.pem"></div><div class="field"><label>默认 TLS 私钥路径</label><input name="defaultInboundKeyFile" value="${h(item.defaultInboundKeyFile)}" placeholder="/root/cert/privkey.pem"></div></div>
+        <div class="form-note">没有现有入站、自动创建 VLESS TLS 入站时，会优先使用这里填写的默认证书路径。</div>
       `)}`;
   }
   if (type === 'socks') {
@@ -562,6 +738,12 @@ function drawerFields(type, item = {}) {
   if (type === 'renew') {
     return `<div class="form-note">用户：${h(item.name)}，当前到期：${fmtDate(item.expireAt)}</div>${renderSection('续费信息', `
       <div class="grid-2"><div class="field"><label>续费月数</label><input name="months" type="number" min="1" value="1"></div><div class="field"><label>收款金额</label><input name="amount" type="number" min="0" step="0.01" value="${h(item.amount || 0)}"></div></div>
+    `)}`;
+  }
+  if (type === 'balance') {
+    return `<div class="form-note">用户：${h(item.name)}，当前余额：${money(item.balance)} ${h(state.db.settings.currency)}</div>${renderSection('余额调整', `
+      <div class="grid-2"><div class="field"><label>调整方式</label><select name="mode"><option value="add">增加余额</option><option value="subtract">扣减余额</option><option value="set">设置为固定余额</option></select></div><div class="field"><label>金额</label><input name="amount" type="number" min="0" step="0.01" value="0" required></div></div>
+      <div class="field"><label>备注</label><input name="remark" placeholder="例如：线下补款 / 退款 / 纠错"></div>
     `)}`;
   }
   if (type === 'security') {
@@ -614,6 +796,11 @@ function bindEvents() {
       render();
     }
   });
+  document.querySelector('[data-modal-backdrop]')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) closeModal(null);
+  });
+  document.querySelector('#modalForm')?.addEventListener('click', (event) => event.stopPropagation());
+  document.querySelector('#modalForm')?.addEventListener('submit', handleModalSubmit);
   const drawerForm = document.querySelector('#drawerForm');
   drawerForm?.addEventListener('click', (event) => event.stopPropagation());
   drawerForm?.addEventListener('submit', handleDrawerSubmit);
@@ -621,13 +808,29 @@ function bindEvents() {
   document.querySelector('#userRenewForm')?.addEventListener('submit', handleUserRenewSubmit);
 }
 
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Escape') return;
+  if (state.modal) return closeModal(null);
+  if (state.drawer) {
+    state.drawer = null;
+    render();
+  }
+});
+
+function handleModalSubmit(event) {
+  event.preventDefault();
+  const input = event.currentTarget.querySelector('[data-modal-input]');
+  closeModal(input ? input.value : true);
+}
+
 async function handleAction(event) {
   const action = event.currentTarget.dataset.action;
   const id = event.currentTarget.dataset.id;
   try {
     if (action === 'refresh') return refresh();
+    if (action === 'cancel-modal') return closeModal(null);
     if (action === 'logout') {
-      await api('/api/logout', { method: 'POST' });
+      await api('/api/logout', { method: 'POST', body: { entry: entryMode } });
       state.user = null;
       state.role = '';
       state.db = null;
@@ -650,18 +853,20 @@ async function handleAction(event) {
       const group = getCardGroup(event.currentTarget.dataset.index);
       if (!group) return toast('这个分类不存在，请刷新后再试');
       const sample = group.cards.find((card) => card.status === 'unused') || group.cards[0] || {};
-      state.drawer = { type: 'cards', item: { type: group.type, amount: sample.amount || 10, remark: sample.remark || '' } };
+      state.drawer = { type: 'cards', item: { batchId: group.batchId, type: group.type, amount: sample.amount || 10, remark: sample.remark || '' } };
       return render();
     }
     if (action === 'rename-card-group') {
       const group = getCardGroup(event.currentTarget.dataset.index);
       if (!group) return toast('这个分类不存在，请刷新后再试');
-      const nextType = prompt('请输入新的卡密分类名称', group.type);
+      const nextType = await promptDialog('修改卡密分类名称', '输入新的分类名称，保存后会同步到这个分类下的卡密。', group.type);
       if (nextType === null) return;
       if (!nextType.trim()) return toast('分类名称不能为空');
-      const result = await api('/api/cards/bulk-update', { method: 'POST', body: { ids: group.cards.map((card) => card.id), type: nextType.trim() } });
+      const result = group.batchId
+        ? await api(`/api/card-batches/${group.batchId}`, { method: 'PUT', body: { name: nextType.trim() } })
+        : await api('/api/cards/bulk-update', { method: 'POST', body: { ids: group.cards.map((card) => card.id), type: nextType.trim() } });
       state.db = result.data;
-      toast(`已修改 ${result.updated || 0} 张卡密的分类名称`);
+      toast(group.batchId ? '卡密批次名称已修改' : `已修改 ${result.updated || 0} 张卡密的分类名称`);
       return render();
     }
     if (action === 'delete-card-group') {
@@ -669,8 +874,10 @@ async function handleAction(event) {
       if (!group) return toast('这个分类不存在，请刷新后再试');
       const ids = group.cards.filter((card) => ['unused', 'disabled'].includes(card.status)).map((card) => card.id);
       if (!ids.length) return toast('这个分类没有可删除的未使用或已禁用卡密');
-      if (!confirm(`确定删除“${group.type}”分类下 ${ids.length} 张未使用/已禁用卡密？已使用卡密会保留。`)) return;
-      const result = await api('/api/cards/bulk-delete', { method: 'POST', body: { ids } });
+      if (!await confirmDialog('删除未使用卡密', `确定删除“${group.type}”分类下 ${ids.length} 张未使用或已禁用卡密？已使用卡密会保留。`, { tone: 'danger', confirmText: '删除' })) return;
+      const result = group.batchId
+        ? await api(`/api/card-batches/${group.batchId}`, { method: 'DELETE' })
+        : await api('/api/cards/bulk-delete', { method: 'POST', body: { ids } });
       state.db = result.data;
       toast(`已删除 ${result.deleted || 0} 张卡密${result.keptUsed ? `，保留已使用 ${result.keptUsed} 张` : ''}`);
       return render();
@@ -681,6 +888,7 @@ async function handleAction(event) {
     }
     if (action === 'security') state.drawer = { type: 'security', item: null };
     if (action === 'settings') state.drawer = { type: 'settings', item: null };
+    if (action === 'card-link-settings') state.drawer = { type: 'cardLink', item: null };
     if (action === 'new-customer') state.drawer = { type: 'customer', item: null };
     if (action === 'edit-customer') state.drawer = { type: 'customer', item: state.db.customers.find((customer) => customer.id === id) };
     if (action === 'generate-cards') state.drawer = { type: 'cards', item: null };
@@ -689,6 +897,7 @@ async function handleAction(event) {
     if (action === 'new-socks') state.drawer = { type: 'socks', item: null };
     if (action === 'edit-socks') state.drawer = { type: 'socks', item: state.db.socksNodes.find((socks) => socks.id === id) };
     if (action === 'renew') state.drawer = { type: 'renew', item: state.db.customers.find((customer) => customer.id === id) };
+    if (action === 'adjust-balance') state.drawer = { type: 'balance', item: state.db.customers.find((customer) => customer.id === id) };
     if (state.drawer) return render();
 
     if (action === 'sync') {
@@ -703,9 +912,11 @@ async function handleAction(event) {
     if (action === 'toggle') {
       const result = await api(`/api/customers/${id}/toggle`, { method: 'POST' });
       state.db = result.data;
+      if (result.warning) toast(result.warning);
       return render();
     }
-    if (action === 'delete-customer' && confirm('确定删除这个用户？会同步删除 3-xui 里的 client，并清理这个用户对应的 SOCKS 路由。')) {
+    if (action === 'delete-customer') {
+      if (!await confirmDialog('删除用户', '确定删除这个用户？会同步删除 3-xui 里的 client，并清理这个用户对应的 SOCKS 路由。', { tone: 'danger', confirmText: '删除用户' })) return;
       const result = await api(`/api/customers/${id}`, { method: 'DELETE' });
       state.db = result.data;
       toast(result.warning ? `用户已删除，远程警告：${result.warning}` : '用户已删除，并已同步清理远程资源');
@@ -717,25 +928,29 @@ async function handleAction(event) {
       state.db = result.data;
       return render();
     }
-    if (action === 'delete-card' && confirm('确定删除这张未使用卡密？')) {
+    if (action === 'delete-card') {
+      if (!await confirmDialog('删除卡密', '确定删除这张未使用卡密？', { tone: 'danger', confirmText: '删除' })) return;
       const result = await api(`/api/cards/${id}`, { method: 'DELETE' });
       state.db = result.data;
       return render();
     }
-    if (action === 'delete-server' && confirm('确定删除这个 3x-ui 节点？')) {
+    if (action === 'delete-server') {
+      if (!await confirmDialog('删除 3x-ui 节点', '确定删除这个 3x-ui 节点？', { tone: 'danger', confirmText: '删除' })) return;
       const result = await api(`/api/xui-servers/${id}`, { method: 'DELETE' });
       state.db = result.data;
       return render();
     }
-    if (action === 'delete-socks' && confirm('确定删除这个 SOCKS 出站？')) {
+    if (action === 'delete-socks') {
+      if (!await confirmDialog('删除 SOCKS 出站', '确定删除这个 SOCKS 出站？', { tone: 'danger', confirmText: '删除' })) return;
       const result = await api(`/api/socks-nodes/${id}`, { method: 'DELETE' });
       state.db = result.data;
       return render();
     }
     if (action === 'disable-expired') {
+      if (!await confirmDialog('停用过期用户', '系统会把已经过期的用户改为停用，并尝试同步到 3-xui 禁用对应客户端。确定继续吗？', { confirmText: '开始停用' })) return;
       const result = await api('/api/maintenance/disable-expired', { method: 'POST' });
       state.db = result.data;
-      toast(`已停用 ${result.count} 个过期用户`);
+      toast(result.warning || `已停用 ${result.count} 个过期用户`);
       return render();
     }
     if (action === 'test-server') {
@@ -743,7 +958,8 @@ async function handleAction(event) {
       const result = await api('/api/test-xui', { method: 'POST', body: server });
       return toast(result.message || '3x-ui 节点连接成功');
     }
-    if (action === 'import-server-customers' && confirm('确定从这个 3-xui 节点同步用户到本地用户列表？相同 Client Email 会更新，不会重复新增。')) {
+    if (action === 'import-server-customers') {
+      if (!await confirmDialog('同步 3-xui 用户', '确定从这个 3-xui 节点同步用户到本地用户列表？相同 Client Email 会更新，不会重复新增。', { confirmText: '开始同步' })) return;
       const result = await api(`/api/xui-servers/${id}/import-customers`, { method: 'POST' });
       state.db = result.data;
       toast(`同步完成：用户新增 ${result.detail.created}，更新 ${result.detail.updated}，SOCKS 新增 ${result.detail.socksCreated}，更新 ${result.detail.socksUpdated}，绑定 ${result.detail.socksBound}`);
@@ -772,7 +988,7 @@ async function handleUserRenewSubmit(event) {
   const form = new FormData(event.currentTarget);
   const months = Math.max(1, Number(form.get('months') || 1));
   const price = Number(state.db.customer?.amount || 0) * months;
-  if (!confirm(`确认续费 ${months} 个月？将扣除 ${money(price)} ${state.db.settings.currency}`)) return;
+  if (!await confirmDialog('确认续费', `续费 ${months} 个月将扣除 ${money(price)} ${state.db.settings.currency}。`, { confirmText: '确认续费' })) return;
   try {
     const result = await api('/api/user/renew', { method: 'POST', body: { months } });
     state.db = result.data;
@@ -797,10 +1013,11 @@ async function handleDrawerSubmit(event) {
     let result;
     if (type === 'customer') result = await api(id ? `/api/customers/${id}` : '/api/customers', { method: id ? 'PUT' : 'POST', body });
     if (type === 'cards') result = await api('/api/cards/generate', { method: 'POST', body });
-    if (type === 'settings') result = await api('/api/settings', { method: 'PUT', body });
+    if (type === 'settings' || type === 'cardLink') result = await api('/api/settings', { method: 'PUT', body });
     if (type === 'server') result = await api(id ? `/api/xui-servers/${id}` : '/api/xui-servers', { method: id ? 'PUT' : 'POST', body });
     if (type === 'socks') result = await api(id ? `/api/socks-nodes/${id}` : '/api/socks-nodes', { method: id ? 'PUT' : 'POST', body });
     if (type === 'renew') result = await api(`/api/customers/${id}/renew`, { method: 'POST', body });
+    if (type === 'balance') result = await api(`/api/customers/${id}/balance-adjust`, { method: 'POST', body });
     if (type === 'security') {
       await api('/api/change-password', { method: 'POST', body });
       state.db = null;
@@ -811,7 +1028,14 @@ async function handleDrawerSubmit(event) {
     state.db = result.data;
     state.drawer = null;
     render();
-    toast(type === 'cards' ? `已生成 ${result.generated?.length || 0} 张卡密` : '保存成功');
+    const message = type === 'cards'
+      ? `已生成 ${result.generated?.length || 0} 张卡密`
+      : type === 'settings'
+        ? `系统设置已保存，管理员入口：${result.data?.settings?.adminPath || body.adminPath || '/admin'}`
+        : type === 'cardLink'
+          ? '购买链接已保存'
+          : '保存成功';
+    toast(result.warning || message);
   } catch (error) {
     toast(error.message);
   }
