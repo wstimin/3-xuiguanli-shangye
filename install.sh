@@ -190,7 +190,7 @@ install_local_mysql() {
 }
 
 sql_escape() {
-  printf '%s' "$1" | sed "s/\\/\\\\/g; s/'/''/g"
+  printf '%s' "$1" | sed "s/'/''/g"
 }
 
 mysql_root_exec() {
